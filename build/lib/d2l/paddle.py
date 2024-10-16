@@ -1,17 +1,3 @@
-DATA_HUB = dict()
-DATA_URL = 'http://d2l-data.s3-accelerate.amazonaws.com/'
-
-import numpy as np
-import torch
-import torchvision
-from PIL import Image
-from torch import nn
-from torch.nn import functional as F
-from torch.utils import data
-from torchvision import transforms
-
-nn_Module = nn.Module
-
 #################   WARNING   ################
 # The below part is generated automatically through:
 #    d2lbook build lib
@@ -37,21 +23,18 @@ from matplotlib_inline import backend_inline
 
 d2l = sys.modules[__name__]
 
+import warnings
 import numpy as np
-import torch
-import torchvision
-from PIL import Image
-from torch import nn
-from torch.nn import functional as F
-from torch.utils import data
-from torchvision import transforms
 
-has_musa = False
-try:
-    import torch_musa
-    has_musa = True
-except ImportError:
-    pass
+warnings.filterwarnings("ignore")
+import paddle
+import paddle.vision as paddlevision
+from paddle import nn
+from paddle.nn import functional as F
+from paddle.vision import transforms
+from PIL import Image
+
+paddle.disable_signal_handler()
 
 def use_svg_display():
     """使用svg格式在Jupyter中显示绘图
@@ -166,17 +149,20 @@ def sgd(params, lr, batch_size):
     """小批量随机梯度下降
 
     Defined in :numref:`sec_linear_scratch`"""
-    with torch.no_grad():
-        for param in params:
-            param -= lr * param.grad / batch_size
-            param.grad.zero_()
+    with paddle.no_grad():
+        for i, param in enumerate(params):
+            param -= lr * params[i].grad / batch_size
+            params[i].set_value(param)
+            params[i].clear_gradient()
 
 def load_array(data_arrays, batch_size, is_train=True):
-    """构造一个PyTorch数据迭代器
+    """构造一个Paddle数据迭代器
 
     Defined in :numref:`sec_linear_concise`"""
-    dataset = data.TensorDataset(*data_arrays)
-    return data.DataLoader(dataset, batch_size, shuffle=is_train)
+    dataset = paddle.io.TensorDataset(data_arrays)
+    return paddle.io.DataLoader(dataset, batch_size=batch_size,
+                                shuffle=is_train,
+                                return_list=True)
 
 def get_fashion_mnist_labels(labels):
     """返回Fashion-MNIST数据集的文本标签
@@ -194,7 +180,7 @@ def show_images(imgs, num_rows, num_cols, titles=None, scale=1.5):
     _, axes = d2l.plt.subplots(num_rows, num_cols, figsize=figsize)
     axes = axes.flatten()
     for i, (ax, img) in enumerate(zip(axes, imgs)):
-        if torch.is_tensor(img):
+        if paddle.is_tensor(img):
             # 图片张量
             ax.imshow(img.numpy())
         else:
@@ -220,14 +206,20 @@ def load_data_fashion_mnist(batch_size, resize=None):
     if resize:
         trans.insert(0, transforms.Resize(resize))
     trans = transforms.Compose(trans)
-    mnist_train = torchvision.datasets.FashionMNIST(
-        root="../data", train=True, transform=trans, download=True)
-    mnist_test = torchvision.datasets.FashionMNIST(
-        root="../data", train=False, transform=trans, download=True)
-    return (data.DataLoader(mnist_train, batch_size, shuffle=True,
-                            num_workers=get_dataloader_workers()),
-            data.DataLoader(mnist_test, batch_size, shuffle=False,
-                            num_workers=get_dataloader_workers()))
+    mnist_train = paddle.vision.datasets.FashionMNIST(mode="train",
+                                                      transform=trans)
+    mnist_test = paddle.vision.datasets.FashionMNIST(mode="test",
+                                                     transform=trans)
+    return (paddle.io.DataLoader(dataset=mnist_train,
+                                 batch_size=batch_size,
+                                 shuffle=True,
+                                 return_list=True,
+                                 num_workers=get_dataloader_workers()),
+            paddle.io.DataLoader(dataset=mnist_test,
+                                 batch_size=batch_size,
+                                 return_list=True,
+                                 shuffle=True,
+                                 num_workers=get_dataloader_workers()))
 
 def accuracy(y_hat, y):
     """计算预测正确的数量
@@ -238,14 +230,26 @@ def accuracy(y_hat, y):
     cmp = d2l.astype(y_hat, y.dtype) == y
     return float(d2l.reduce_sum(d2l.astype(cmp, y.dtype)))
 
+def accuracy(y_hat, y):
+    """计算预测正确的数量
+
+    Defined in :numref:`sec_softmax_scratch`"""
+    if len(y_hat.shape) > 1 and y_hat.shape[1] > 1:
+        y_hat = y_hat.argmax(axis=1)
+    if len(y_hat.shape) < len(y.shape):
+        cmp = y_hat.astype(y.dtype) == y.squeeze()
+    else:
+        cmp = y_hat.astype(y.dtype) == y
+    return float(cmp.astype(y.dtype).sum())
+
 def evaluate_accuracy(net, data_iter):
     """计算在指定数据集上模型的精度
 
     Defined in :numref:`sec_softmax_scratch`"""
-    if isinstance(net, torch.nn.Module):
+    if isinstance(net, paddle.nn.Layer):
         net.eval()  # 将模型设置为评估模式
     metric = Accumulator(2)  # 正确预测数、预测总数
-    with torch.no_grad():
+    with paddle.no_grad():
         for X, y in data_iter:
             metric.add(accuracy(net(X), y), d2l.size(y))
     return metric[0] / metric[1]
@@ -270,17 +274,18 @@ def train_epoch_ch3(net, train_iter, loss, updater):
 
     Defined in :numref:`sec_softmax_scratch`"""
     # 将模型设置为训练模式
-    if isinstance(net, torch.nn.Module):
+    if isinstance(net, paddle.nn.Layer):
         net.train()
     # 训练损失总和、训练准确度总和、样本数
     metric = Accumulator(3)
+
     for X, y in train_iter:
         # 计算梯度并更新参数
         y_hat = net(X)
         l = loss(y_hat, y)
-        if isinstance(updater, torch.optim.Optimizer):
-            # 使用PyTorch内置的优化器和损失函数
-            updater.zero_grad()
+        if isinstance(updater, paddle.optimizer.Optimizer):
+            # 使用PaddlePaddle内置的优化器和损失函数
+            updater.clear_grad()
             l.mean().backward()
             updater.step()
         else:
@@ -288,7 +293,6 @@ def train_epoch_ch3(net, train_iter, loss, updater):
             l.sum().backward()
             updater(X.shape[0])
         metric.add(float(l.sum()), accuracy(y_hat, y), y.numel())
-    # 返回训练损失和训练精度
     return metric[0] / metric[2], metric[1] / metric[2]
 
 class Animator:
@@ -360,15 +364,15 @@ def predict_ch3(net, test_iter, n=6):
         d2l.reshape(X[0:n], (n, 28, 28)), 1, n, titles=titles[0:n])
 
 def evaluate_loss(net, data_iter, loss):
-    """评估给定数据集上模型的损失
+    """评估给定数据集上模型的损失。
 
     Defined in :numref:`sec_model_selection`"""
-    metric = d2l.Accumulator(2)  # 损失的总和,样本数量
+    metric = d2l.Accumulator(2)  # 损失的总和, 样本数量
     for X, y in data_iter:
         out = net(X)
-        y = d2l.reshape(y, out.shape)
+        y = y.reshape(out.shape)
         l = loss(out, y)
-        metric.add(d2l.reduce_sum(l), d2l.size(l))
+        metric.add(l.sum(), l.numel())
     return metric[0] / metric[1]
 
 DATA_HUB = dict()
@@ -430,30 +434,20 @@ DATA_HUB['kaggle_house_test'] = (
     'fa19780a7b011d9b009e8bff8e99922a8ee2eb90')
 
 def try_gpu(i=0):
-    """如果存在，则返回gpu(i)，否则返回cpu()
+    """如果存在，则返回gpu(i)，否则返回cpu()。
 
     Defined in :numref:`sec_use_gpu`"""
-    if has_musa:
-        if torch.musa.device_count() >= i + 1:
-            return torch.device(f'musa:{i}')
-    else:
-        if torch.cuda.device_count() >= i + 1:
-            return torch.device(f'cuda:{i}')
-    return torch.device('cpu')
+    if paddle.device.cuda.device_count() >= i + 1:
+        return paddle.CUDAPlace(i)
+    return paddle.CPUPlace()
 
 def try_all_gpus():
-    """返回所有可用的GPU，如果没有GPU，则返回[cpu(),]
+    """返回所有可用的GPU，如果没有GPU，则返回[cpu(),]。
 
     Defined in :numref:`sec_use_gpu`"""
-    if has_musa:
-        num = torch.musa.device_count()
-        if num > 0:
-            return [torch.device(f'musa:{i}') for i in range(num)]
-    else:
-        num = torch.cuda.device_count()
-        if num > 0:
-            return [torch.device(f'cuda:{i}') for i in range(num)]
-    return [torch.device('cpu')]
+    devices = [paddle.CUDAPlace(i)
+               for i in range(paddle.device.cuda.device_count())]
+    return devices if devices else paddle.CPUPlace()
 
 def corr2d(X, K):
     """计算二维互相关运算
@@ -470,20 +464,21 @@ def evaluate_accuracy_gpu(net, data_iter, device=None):
     """使用GPU计算模型在数据集上的精度
 
     Defined in :numref:`sec_lenet`"""
-    if isinstance(net, nn.Module):
+    if isinstance(net, nn.Layer):
         net.eval()  # 设置为评估模式
         if not device:
-            device = next(iter(net.parameters())).device
+            device = next(iter(net.parameters())).place
+    paddle.set_device("gpu:{}".format(str(device)[-2]))
     # 正确预测的数量，总预测的数量
     metric = d2l.Accumulator(2)
-    with torch.no_grad():
+    with paddle.no_grad():
         for X, y in data_iter:
             if isinstance(X, list):
-                # BERT微调所需的（之后将介绍）
-                X = [x.to(device) for x in X]
+                # BERT微调所需的
+                X = [paddle.to_tensor(x, place=device) for x in X]
             else:
-                X = X.to(device)
-            y = y.to(device)
+                X = paddle.to_tensor(X, place=device)
+            y = paddle.to_tensor(y, place=device)
             metric.add(d2l.accuracy(net(X), y), d2l.size(y))
     return metric[0] / metric[1]
 
@@ -492,12 +487,12 @@ def train_ch6(net, train_iter, test_iter, num_epochs, lr, device):
 
     Defined in :numref:`sec_lenet`"""
     def init_weights(m):
-        if type(m) == nn.Linear or type(m) == nn.Conv2d:
-            nn.init.xavier_uniform_(m.weight)
+        if type(m) == nn.Linear or type(m) == nn.Conv2D:
+            nn.initializer.XavierUniform(m.weight)
     net.apply(init_weights)
     print('training on', device)
     net.to(device)
-    optimizer = torch.optim.SGD(net.parameters(), lr=lr)
+    optimizer = paddle.optimizer.SGD(learning_rate=lr, parameters=net.parameters())
     loss = nn.CrossEntropyLoss()
     animator = d2l.Animator(xlabel='epoch', xlim=[1, num_epochs],
                             legend=['train loss', 'train acc', 'test acc'])
@@ -508,13 +503,13 @@ def train_ch6(net, train_iter, test_iter, num_epochs, lr, device):
         net.train()
         for i, (X, y) in enumerate(train_iter):
             timer.start()
-            optimizer.zero_grad()
-            X, y = X.to(device), y.to(device)
+            optimizer.clear_grad()
+            X, y = paddle.to_tensor(X, place=device), paddle.to_tensor(y, place=device)
             y_hat = net(X)
             l = loss(y_hat, y)
             l.backward()
             optimizer.step()
-            with torch.no_grad():
+            with paddle.no_grad():
                 metric.add(l * X.shape[0], d2l.accuracy(y_hat, y), X.shape[0])
             timer.stop()
             train_l = metric[0] / metric[2]
@@ -529,21 +524,22 @@ def train_ch6(net, train_iter, test_iter, num_epochs, lr, device):
     print(f'{metric[2] * num_epochs / timer.sum():.1f} examples/sec '
           f'on {str(device)}')
 
-class Residual(nn.Module):
-    def __init__(self, input_channels, num_channels,
-                 use_1x1conv=False, strides=1):
-        super().__init__()
-        self.conv1 = nn.Conv2d(input_channels, num_channels,
-                               kernel_size=3, padding=1, stride=strides)
-        self.conv2 = nn.Conv2d(num_channels, num_channels,
-                               kernel_size=3, padding=1)
+class Residual(nn.Layer):
+    def __init__(self, input_channels, num_channels, use_1x1conv=False,
+                 strides=1):
+        super(Residual, self).__init__()
+        self.conv1 = nn.Conv2D(input_channels, num_channels, kernel_size=3,
+                               padding=1, stride=strides)
+        self.conv2 = nn.Conv2D(num_channels, num_channels, kernel_size=3,
+                               padding=1)
         if use_1x1conv:
-            self.conv3 = nn.Conv2d(input_channels, num_channels,
+            self.conv3 = nn.Conv2D(input_channels, num_channels,
                                    kernel_size=1, stride=strides)
         else:
             self.conv3 = None
-        self.bn1 = nn.BatchNorm2d(num_channels)
-        self.bn2 = nn.BatchNorm2d(num_channels)
+        self.bn1 = nn.BatchNorm2D(num_channels)
+        self.bn2 = nn.BatchNorm2D(num_channels)
+        self.relu = nn.ReLU()
 
     def forward(self, X):
         Y = F.relu(self.bn1(self.conv1(X)))
@@ -678,7 +674,7 @@ def seq_data_iter_sequential(corpus, batch_size, num_steps):
     num_tokens = ((len(corpus) - offset - 1) // batch_size) * batch_size
     Xs = d2l.tensor(corpus[offset: offset + num_tokens])
     Ys = d2l.tensor(corpus[offset + 1: offset + 1 + num_tokens])
-    Xs, Ys = Xs.reshape(batch_size, -1), Ys.reshape(batch_size, -1)
+    Xs, Ys = Xs.reshape((batch_size, -1)), Ys.reshape((batch_size, -1))
     num_batches = Xs.shape[1] // num_steps
     for i in range(0, num_steps * num_batches, num_steps):
         X = Xs[:, i: i + num_steps]
@@ -710,51 +706,51 @@ def load_data_time_machine(batch_size, num_steps,
 
 class RNNModelScratch:
     """从零开始实现的循环神经网络模型"""
-    def __init__(self, vocab_size, num_hiddens, device,
+    def __init__(self, vocab_size, num_hiddens,
                  get_params, init_state, forward_fn):
         """Defined in :numref:`sec_rnn_scratch`"""
         self.vocab_size, self.num_hiddens = vocab_size, num_hiddens
-        self.params = get_params(vocab_size, num_hiddens, device)
+        self.params = get_params(vocab_size, num_hiddens)
         self.init_state, self.forward_fn = init_state, forward_fn
 
     def __call__(self, X, state):
-        X = F.one_hot(X.T, self.vocab_size).type(torch.float32)
+        X = F.one_hot(X.T, self.vocab_size)
         return self.forward_fn(X, state, self.params)
 
-    def begin_state(self, batch_size, device):
-        return self.init_state(batch_size, self.num_hiddens, device)
+    def begin_state(self, batch_size):
+        return self.init_state(batch_size, self.num_hiddens)
 
 def predict_ch8(prefix, num_preds, net, vocab, device):
     """在prefix后面生成新字符
 
     Defined in :numref:`sec_rnn_scratch`"""
-    state = net.begin_state(batch_size=1, device=device)
+    state = net.begin_state(batch_size=1)
     outputs = [vocab[prefix[0]]]
-    get_input = lambda: d2l.reshape(d2l.tensor(
-        [outputs[-1]], device=device), (1, 1))
+    get_input = lambda: d2l.reshape(d2l.tensor(outputs[-1], place=device), (1, 1))
     for y in prefix[1:]:  # 预热期
         _, state = net(get_input(), state)
         outputs.append(vocab[y])
     for _ in range(num_preds):  # 预测num_preds步
         y, state = net(get_input(), state)
-        outputs.append(int(y.argmax(dim=1).reshape(1)))
+        outputs.append(int(paddle.reshape(paddle.argmax(y,axis=1),shape=[1])))
     return ''.join([vocab.idx_to_token[i] for i in outputs])
 
 def grad_clipping(net, theta):
     """裁剪梯度
 
     Defined in :numref:`sec_rnn_scratch`"""
-    if isinstance(net, nn.Module):
-        params = [p for p in net.parameters() if p.requires_grad]
+    if isinstance(net, nn.Layer):
+        params = [p for p in net.parameters() if not p.stop_gradient]
     else:
         params = net.params
-    norm = torch.sqrt(sum(torch.sum((p.grad ** 2)) for p in params))
+    norm = paddle.sqrt(sum(paddle.sum((p.grad ** 2)) for p in params))
     if norm > theta:
-        for param in params:
-            param.grad[:] *= theta / norm
+        with paddle.no_grad():
+            for param in params:
+                param.grad.set_value(param.grad * theta / norm)
 
 def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
-    """训练网络一个迭代周期（定义见第8章）
+    """训练网络一个迭代周期（定义见第8章)
 
     Defined in :numref:`sec_rnn_scratch`"""
     state, timer = None, d2l.Timer()
@@ -762,21 +758,22 @@ def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
     for X, Y in train_iter:
         if state is None or use_random_iter:
             # 在第一次迭代或使用随机抽样时初始化state
-            state = net.begin_state(batch_size=X.shape[0], device=device)
+            state = net.begin_state(batch_size=X.shape[0])
         else:
-            if isinstance(net, nn.Module) and not isinstance(state, tuple):
+            if isinstance(net, nn.Layer) and not isinstance(state, tuple):
                 # state对于nn.GRU是个张量
-                state.detach_()
+                state.stop_gradient=True
             else:
                 # state对于nn.LSTM或对于我们从零开始实现的模型是个张量
                 for s in state:
-                    s.detach_()
-        y = Y.T.reshape(-1)
-        X, y = X.to(device), y.to(device)
+                    s.stop_gradient=True
+        y = paddle.reshape(Y.T,shape=[-1])
+        X = paddle.to_tensor(X, place=device)
+        y = paddle.to_tensor(y, place=device)
         y_hat, state = net(X, state)
-        l = loss(y_hat, y.long()).mean()
-        if isinstance(updater, torch.optim.Optimizer):
-            updater.zero_grad()
+        l = loss(y_hat, y).mean()
+        if isinstance(updater, paddle.optimizer.Optimizer):
+            updater.clear_grad()
             l.backward()
             grad_clipping(net, 1)
             updater.step()
@@ -785,11 +782,11 @@ def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
             grad_clipping(net, 1)
             # 因为已经调用了mean函数
             updater(batch_size=1)
+
         metric.add(l * d2l.size(y), d2l.size(y))
     return math.exp(metric[0] / metric[1]), metric[1] / timer.stop()
 
-def train_ch8(net, train_iter, vocab, lr, num_epochs, device,
-              use_random_iter=False):
+def train_ch8(net, train_iter, vocab, lr, num_epochs, device, use_random_iter=False):
     """训练模型（定义见第8章）
 
     Defined in :numref:`sec_rnn_scratch`"""
@@ -797,8 +794,9 @@ def train_ch8(net, train_iter, vocab, lr, num_epochs, device,
     animator = d2l.Animator(xlabel='epoch', ylabel='perplexity',
                             legend=['train'], xlim=[10, num_epochs])
     # 初始化
-    if isinstance(net, nn.Module):
-        updater = torch.optim.SGD(net.parameters(), lr)
+    if isinstance(net, nn.Layer):
+        updater = paddle.optimizer.SGD(
+                learning_rate=lr, parameters=net.parameters())
     else:
         updater = lambda batch_size: d2l.sgd(net.params, lr, batch_size)
     predict = lambda prefix: predict_ch8(prefix, 50, net, vocab, device)
@@ -813,7 +811,7 @@ def train_ch8(net, train_iter, vocab, lr, num_epochs, device,
     print(predict('time traveller'))
     print(predict('traveller'))
 
-class RNNModel(nn.Module):
+class RNNModel(nn.Layer):
     """循环神经网络模型
 
     Defined in :numref:`sec_rnn-concise`"""
@@ -823,7 +821,7 @@ class RNNModel(nn.Module):
         self.vocab_size = vocab_size
         self.num_hiddens = self.rnn.hidden_size
         # 如果RNN是双向的（之后将介绍），num_directions应该是2，否则应该是1
-        if not self.rnn.bidirectional:
+        if self.rnn.num_directions==1:
             self.num_directions = 1
             self.linear = nn.Linear(self.num_hiddens, self.vocab_size)
         else:
@@ -831,28 +829,26 @@ class RNNModel(nn.Module):
             self.linear = nn.Linear(self.num_hiddens * 2, self.vocab_size)
 
     def forward(self, inputs, state):
-        X = F.one_hot(inputs.T.long(), self.vocab_size)
-        X = X.to(torch.float32)
+        X = F.one_hot(inputs.T, self.vocab_size)
         Y, state = self.rnn(X, state)
         # 全连接层首先将Y的形状改为(时间步数*批量大小,隐藏单元数)
         # 它的输出形状是(时间步数*批量大小,词表大小)。
         output = self.linear(Y.reshape((-1, Y.shape[-1])))
         return output, state
 
-    def begin_state(self, device, batch_size=1):
+    def begin_state(self, batch_size=1):
         if not isinstance(self.rnn, nn.LSTM):
             # nn.GRU以张量作为隐状态
-            return  torch.zeros((self.num_directions * self.rnn.num_layers,
-                                 batch_size, self.num_hiddens),
-                                device=device)
+            return  paddle.zeros(shape=[self.num_directions * self.rnn.num_layers,
+                                                           batch_size, self.num_hiddens])
         else:
             # nn.LSTM以元组作为隐状态
-            return (torch.zeros((
-                self.num_directions * self.rnn.num_layers,
-                batch_size, self.num_hiddens), device=device),
-                    torch.zeros((
-                        self.num_directions * self.rnn.num_layers,
-                        batch_size, self.num_hiddens), device=device))
+            return (paddle.zeros(
+                shape=[self.num_directions * self.rnn.num_layers,
+                batch_size, self.num_hiddens]),
+                    paddle.zeros(
+                        shape=[self.num_directions * self.rnn.num_layers,
+                        batch_size, self.num_hiddens]))
 
 d2l.DATA_HUB['fra-eng'] = (d2l.DATA_URL + 'fra-eng.zip',
                            '94646ad1522d915e7b0f9296181140edcf86a4f5')
@@ -944,7 +940,7 @@ def load_data_nmt(batch_size, num_steps, num_examples=600):
     data_iter = d2l.load_array(data_arrays, batch_size)
     return data_iter, src_vocab, tgt_vocab
 
-class Encoder(nn.Module):
+class Encoder(nn.Layer):
     """编码器-解码器架构的基本编码器接口"""
     def __init__(self, **kwargs):
         super(Encoder, self).__init__(**kwargs)
@@ -952,7 +948,7 @@ class Encoder(nn.Module):
     def forward(self, X, *args):
         raise NotImplementedError
 
-class Decoder(nn.Module):
+class Decoder(nn.Layer):
     """编码器-解码器架构的基本解码器接口
 
     Defined in :numref:`sec_encoder-decoder`"""
@@ -965,7 +961,7 @@ class Decoder(nn.Module):
     def forward(self, X, state):
         raise NotImplementedError
 
-class EncoderDecoder(nn.Module):
+class EncoderDecoder(nn.Layer):
     """编码器-解码器架构的基类
 
     Defined in :numref:`sec_encoder-decoder`"""
@@ -986,31 +982,35 @@ class Seq2SeqEncoder(d2l.Encoder):
     def __init__(self, vocab_size, embed_size, num_hiddens, num_layers,
                  dropout=0, **kwargs):
         super(Seq2SeqEncoder, self).__init__(**kwargs)
+        weight_ih_attr = paddle.ParamAttr(initializer=nn.initializer.XavierUniform())
+        weight_hh_attr = paddle.ParamAttr(initializer=nn.initializer.XavierUniform())
         # 嵌入层
         self.embedding = nn.Embedding(vocab_size, embed_size)
-        self.rnn = nn.GRU(embed_size, num_hiddens, num_layers,
-                          dropout=dropout)
+        self.rnn = nn.GRU(embed_size, num_hiddens, num_layers, dropout=dropout,
+                          time_major=True, weight_ih_attr=weight_ih_attr, weight_hh_attr=weight_hh_attr)
 
     def forward(self, X, *args):
         # 输出'X'的形状：(batch_size,num_steps,embed_size)
         X = self.embedding(X)
         # 在循环神经网络模型中，第一个轴对应于时间步
-        X = X.permute(1, 0, 2)
+        X = X.transpose([1, 0, 2])
         # 如果未提及状态，则默认为0
         output, state = self.rnn(X)
-        # output的形状:(num_steps,batch_size,num_hiddens)
-        # state的形状:(num_layers,batch_size,num_hiddens)
+        # PaddlePaddle的GRU层output的形状:(batch_size,time_steps,num_directions * num_hiddens),
+        # 需设定time_major=True,指定input的第一个维度为time_steps
+        # state[0]的形状:(num_layers,batch_size,num_hiddens)
         return output, state
 
 def sequence_mask(X, valid_len, value=0):
     """在序列中屏蔽不相关的项
 
     Defined in :numref:`sec_seq2seq_decoder`"""
-    maxlen = X.size(1)
-    mask = torch.arange((maxlen), dtype=torch.float32,
-                        device=X.device)[None, :] < valid_len[:, None]
-    X[~mask] = value
-    return X
+    maxlen = X.shape[1]
+    mask = paddle.arange((maxlen), dtype=paddle.float32)[None, :] < valid_len[:, None]
+    Xtype = X.dtype
+    X = X.astype(paddle.float32)
+    X[~mask] = float(value)
+    return X.astype(Xtype)
 
 class MaskedSoftmaxCELoss(nn.CrossEntropyLoss):
     """带遮蔽的softmax交叉熵损失函数
@@ -1020,29 +1020,19 @@ class MaskedSoftmaxCELoss(nn.CrossEntropyLoss):
     # label的形状：(batch_size,num_steps)
     # valid_len的形状：(batch_size,)
     def forward(self, pred, label, valid_len):
-        weights = torch.ones_like(label)
+        weights = paddle.ones_like(label)
         weights = sequence_mask(weights, valid_len)
         self.reduction='none'
         unweighted_loss = super(MaskedSoftmaxCELoss, self).forward(
-            pred.permute(0, 2, 1), label)
-        weighted_loss = (unweighted_loss * weights).mean(dim=1)
+            pred, label)
+        weighted_loss = (unweighted_loss * weights).mean(axis=1)
         return weighted_loss
 
 def train_seq2seq(net, data_iter, lr, num_epochs, tgt_vocab, device):
     """训练序列到序列模型
 
     Defined in :numref:`sec_seq2seq_decoder`"""
-    def xavier_init_weights(m):
-        if type(m) == nn.Linear:
-            nn.init.xavier_uniform_(m.weight)
-        if type(m) == nn.GRU:
-            for param in m._flat_weights_names:
-                if "weight" in param:
-                    nn.init.xavier_uniform_(m._parameters[param])
-
-    net.apply(xavier_init_weights)
-    net.to(device)
-    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
+    optimizer = paddle.optimizer.Adam(learning_rate=lr, parameters=net.parameters())
     loss = MaskedSoftmaxCELoss()
     net.train()
     animator = d2l.Animator(xlabel='epoch', ylabel='loss',
@@ -1051,18 +1041,17 @@ def train_seq2seq(net, data_iter, lr, num_epochs, tgt_vocab, device):
         timer = d2l.Timer()
         metric = d2l.Accumulator(2)  # 训练损失总和，词元数量
         for batch in data_iter:
-            optimizer.zero_grad()
-            X, X_valid_len, Y, Y_valid_len = [x.to(device) for x in batch]
-            bos = torch.tensor([tgt_vocab['<bos>']] * Y.shape[0],
-                          device=device).reshape(-1, 1)
-            dec_input = torch.cat([bos, Y[:, :-1]], 1)  # 强制教学
-            Y_hat, _ = net(X, dec_input, X_valid_len)
-            l = loss(Y_hat, Y, Y_valid_len)
-            l.sum().backward()	# 损失函数的标量进行“反向传播”
+            optimizer.clear_grad()
+            X, X_valid_len, Y, Y_valid_len = [paddle.to_tensor(x, place=device) for x in batch]
+            bos = paddle.to_tensor([tgt_vocab['<bos>']] * Y.shape[0]).reshape([-1, 1])
+            dec_input = paddle.concat([bos, Y[:, :-1]], 1)  # 强制教学
+            Y_hat, _ = net(X, dec_input, X_valid_len.squeeze())
+            l = loss(Y_hat, Y, Y_valid_len.squeeze())
+            l.backward()	# 损失函数的标量进行“反向传播”
             d2l.grad_clipping(net, 1)
             num_tokens = Y_valid_len.sum()
             optimizer.step()
-            with torch.no_grad():
+            with paddle.no_grad():
                 metric.add(l.sum(), num_tokens)
         if (epoch + 1) % 10 == 0:
             animator.add(epoch + 1, (metric[0] / metric[1],))
@@ -1078,22 +1067,22 @@ def predict_seq2seq(net, src_sentence, src_vocab, tgt_vocab, num_steps,
     net.eval()
     src_tokens = src_vocab[src_sentence.lower().split(' ')] + [
         src_vocab['<eos>']]
-    enc_valid_len = torch.tensor([len(src_tokens)], device=device)
+    enc_valid_len = paddle.to_tensor([len(src_tokens)], place=device)
     src_tokens = d2l.truncate_pad(src_tokens, num_steps, src_vocab['<pad>'])
     # 添加批量轴
-    enc_X = torch.unsqueeze(
-        torch.tensor(src_tokens, dtype=torch.long, device=device), dim=0)
+    enc_X = paddle.unsqueeze(
+        paddle.to_tensor(src_tokens, dtype=paddle.int64, place=device), axis=0)
     enc_outputs = net.encoder(enc_X, enc_valid_len)
     dec_state = net.decoder.init_state(enc_outputs, enc_valid_len)
     # 添加批量轴
-    dec_X = torch.unsqueeze(torch.tensor(
-        [tgt_vocab['<bos>']], dtype=torch.long, device=device), dim=0)
+    dec_X = paddle.unsqueeze(paddle.to_tensor(
+        [tgt_vocab['<bos>']], dtype=paddle.int64, place=device), axis=0)
     output_seq, attention_weight_seq = [], []
     for _ in range(num_steps):
         Y, dec_state = net.decoder(dec_X, dec_state)
         # 我们使用具有预测最高可能性的词元，作为解码器在下一时间步的输入
-        dec_X = Y.argmax(dim=2)
-        pred = dec_X.squeeze(dim=0).type(torch.int32).item()
+        dec_X = Y.argmax(axis=2)
+        pred = dec_X.squeeze(axis=0).astype(paddle.int32).item()
         # 保存注意力权重（稍后讨论）
         if save_attention_weights:
             attention_weight_seq.append(net.decoder.attention_weights)
@@ -1147,27 +1136,27 @@ def masked_softmax(X, valid_lens):
     Defined in :numref:`sec_attention-scoring-functions`"""
     # X:3D张量，valid_lens:1D或2D张量
     if valid_lens is None:
-        return nn.functional.softmax(X, dim=-1)
+        return nn.functional.softmax(X, axis=-1)
     else:
         shape = X.shape
         if valid_lens.dim() == 1:
-            valid_lens = torch.repeat_interleave(valid_lens, shape[1])
+            valid_lens = paddle.repeat_interleave(valid_lens, shape[1])
         else:
-            valid_lens = valid_lens.reshape(-1)
+            valid_lens = valid_lens.reshape((-1,))
         # 最后一轴上被掩蔽的元素使用一个非常大的负值替换，从而其softmax输出为0
-        X = d2l.sequence_mask(X.reshape(-1, shape[-1]), valid_lens,
+        X = d2l.sequence_mask(X.reshape((-1, shape[-1])), valid_lens,
                               value=-1e6)
-        return nn.functional.softmax(X.reshape(shape), dim=-1)
+        return nn.functional.softmax(X.reshape(shape), axis=-1)
 
-class AdditiveAttention(nn.Module):
+class AdditiveAttention(nn.Layer):
     """加性注意力
 
     Defined in :numref:`sec_attention-scoring-functions`"""
     def __init__(self, key_size, query_size, num_hiddens, dropout, **kwargs):
         super(AdditiveAttention, self).__init__(**kwargs)
-        self.W_k = nn.Linear(key_size, num_hiddens, bias=False)
-        self.W_q = nn.Linear(query_size, num_hiddens, bias=False)
-        self.w_v = nn.Linear(num_hiddens, 1, bias=False)
+        self.W_k = nn.Linear(key_size, num_hiddens, bias_attr=False)
+        self.W_q = nn.Linear(query_size, num_hiddens, bias_attr=False)
+        self.w_v = nn.Linear(num_hiddens, 1, bias_attr=False)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, queries, keys, values, valid_lens):
@@ -1177,15 +1166,15 @@ class AdditiveAttention(nn.Module):
         # key的形状：(batch_size，1，“键－值”对的个数，num_hiddens)
         # 使用广播方式进行求和
         features = queries.unsqueeze(2) + keys.unsqueeze(1)
-        features = torch.tanh(features)
+        features = paddle.tanh(features)
         # self.w_v仅有一个输出，因此从形状中移除最后那个维度。
         # scores的形状：(batch_size，查询的个数，“键-值”对的个数)
         scores = self.w_v(features).squeeze(-1)
         self.attention_weights = masked_softmax(scores, valid_lens)
         # values的形状：(batch_size，“键－值”对的个数，值的维度)
-        return torch.bmm(self.dropout(self.attention_weights), values)
+        return paddle.bmm(self.dropout(self.attention_weights), values)
 
-class DotProductAttention(nn.Module):
+class DotProductAttention(nn.Layer):
     """缩放点积注意力
 
     Defined in :numref:`subsec_additive-attention`"""
@@ -1200,9 +1189,9 @@ class DotProductAttention(nn.Module):
     def forward(self, queries, keys, values, valid_lens=None):
         d = queries.shape[-1]
         # 设置transpose_b=True为了交换keys的最后两个维度
-        scores = torch.bmm(queries, keys.transpose(1,2)) / math.sqrt(d)
+        scores = paddle.bmm(queries, keys.transpose((0,2,1))) / math.sqrt(d)
         self.attention_weights = masked_softmax(scores, valid_lens)
-        return torch.bmm(self.dropout(self.attention_weights), values)
+        return paddle.bmm(self.dropout(self.attention_weights), values)
 
 class AttentionDecoder(d2l.Decoder):
     """带有注意力机制解码器的基本接口
@@ -1215,19 +1204,17 @@ class AttentionDecoder(d2l.Decoder):
     def attention_weights(self):
         raise NotImplementedError
 
-class MultiHeadAttention(nn.Module):
-    """多头注意力
-
-    Defined in :numref:`sec_multihead-attention`"""
+class MultiHeadAttention(nn.Layer):
+    """Defined in :numref:`sec_multihead-attention`"""
     def __init__(self, key_size, query_size, value_size, num_hiddens,
                  num_heads, dropout, bias=False, **kwargs):
         super(MultiHeadAttention, self).__init__(**kwargs)
         self.num_heads = num_heads
         self.attention = d2l.DotProductAttention(dropout)
-        self.W_q = nn.Linear(query_size, num_hiddens, bias=bias)
-        self.W_k = nn.Linear(key_size, num_hiddens, bias=bias)
-        self.W_v = nn.Linear(value_size, num_hiddens, bias=bias)
-        self.W_o = nn.Linear(num_hiddens, num_hiddens, bias=bias)
+        self.W_q = nn.Linear(query_size, num_hiddens, bias_attr=bias)
+        self.W_k = nn.Linear(key_size, num_hiddens, bias_attr=bias)
+        self.W_v = nn.Linear(value_size, num_hiddens, bias_attr=bias)
+        self.W_o = nn.Linear(num_hiddens, num_hiddens, bias_attr=bias)
 
     def forward(self, queries, keys, values, valid_lens):
         # queries，keys，values的形状:
@@ -1240,12 +1227,11 @@ class MultiHeadAttention(nn.Module):
         queries = transpose_qkv(self.W_q(queries), self.num_heads)
         keys = transpose_qkv(self.W_k(keys), self.num_heads)
         values = transpose_qkv(self.W_v(values), self.num_heads)
-
         if valid_lens is not None:
             # 在轴0，将第一项（标量或者矢量）复制num_heads次，
             # 然后如此复制第二项，然后诸如此类。
-            valid_lens = torch.repeat_interleave(
-                valid_lens, repeats=self.num_heads, dim=0)
+            valid_lens = paddle.repeat_interleave(
+                valid_lens, repeats=self.num_heads, axis=0)
 
         # output的形状:(batch_size*num_heads，查询的个数，
         # num_hiddens/num_heads)
@@ -1262,26 +1248,26 @@ def transpose_qkv(X, num_heads):
     # 输入X的形状:(batch_size，查询或者“键－值”对的个数，num_hiddens)
     # 输出X的形状:(batch_size，查询或者“键－值”对的个数，num_heads，
     # num_hiddens/num_heads)
-    X = X.reshape(X.shape[0], X.shape[1], num_heads, -1)
+    X = X.reshape((X.shape[0], X.shape[1], num_heads, -1))
 
     # 输出X的形状:(batch_size，num_heads，查询或者“键－值”对的个数,
     # num_hiddens/num_heads)
-    X = X.permute(0, 2, 1, 3)
+    X = X.transpose((0, 2, 1, 3))
 
     # 最终输出的形状:(batch_size*num_heads,查询或者“键－值”对的个数,
     # num_hiddens/num_heads)
-    return X.reshape(-1, X.shape[2], X.shape[3])
+    return X.reshape((-1, X.shape[2], X.shape[3]))
 
 
 def transpose_output(X, num_heads):
     """逆转transpose_qkv函数的操作
 
     Defined in :numref:`sec_multihead-attention`"""
-    X = X.reshape(-1, num_heads, X.shape[1], X.shape[2])
-    X = X.permute(0, 2, 1, 3)
-    return X.reshape(X.shape[0], X.shape[1], -1)
+    X = X.reshape((-1, num_heads, X.shape[1], X.shape[2]))
+    X = X.transpose((0, 2, 1, 3))
+    return X.reshape((X.shape[0], X.shape[1], -1))
 
-class PositionalEncoding(nn.Module):
+class PositionalEncoding(nn.Layer):
     """位置编码
 
     Defined in :numref:`sec_self-attention-and-positional-encoding`"""
@@ -1289,18 +1275,18 @@ class PositionalEncoding(nn.Module):
         super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(dropout)
         # 创建一个足够长的P
-        self.P = d2l.zeros((1, max_len, num_hiddens))
-        X = d2l.arange(max_len, dtype=torch.float32).reshape(
-            -1, 1) / torch.pow(10000, torch.arange(
-            0, num_hiddens, 2, dtype=torch.float32) / num_hiddens)
-        self.P[:, :, 0::2] = torch.sin(X)
-        self.P[:, :, 1::2] = torch.cos(X)
+        self.P = paddle.zeros((1, max_len, num_hiddens))
+        X = paddle.arange(max_len, dtype=paddle.float32).reshape(
+            (-1, 1)) / paddle.pow(paddle.to_tensor([10000.0]), paddle.arange(
+            0, num_hiddens, 2, dtype=paddle.float32) / num_hiddens)
+        self.P[:, :, 0::2] = paddle.sin(X)
+        self.P[:, :, 1::2] = paddle.cos(X)
 
     def forward(self, X):
-        X = X + self.P[:, :X.shape[1], :].to(X.device)
+        X = X + self.P[:, :X.shape[1], :]
         return self.dropout(X)
 
-class PositionWiseFFN(nn.Module):
+class PositionWiseFFN(nn.Layer):
     """基于位置的前馈网络
 
     Defined in :numref:`sec_transformer`"""
@@ -1314,7 +1300,7 @@ class PositionWiseFFN(nn.Module):
     def forward(self, X):
         return self.dense2(self.relu(self.dense1(X)))
 
-class AddNorm(nn.Module):
+class AddNorm(nn.Layer):
     """残差连接后进行层规范化
 
     Defined in :numref:`sec_transformer`"""
@@ -1326,8 +1312,8 @@ class AddNorm(nn.Module):
     def forward(self, X, Y):
         return self.ln(self.dropout(Y) + X)
 
-class EncoderBlock(nn.Module):
-    """Transformer编码器块
+class EncoderBlock(nn.Layer):
+    """transformer编码器块
 
     Defined in :numref:`sec_transformer`"""
     def __init__(self, key_size, query_size, value_size, num_hiddens,
@@ -1347,7 +1333,7 @@ class EncoderBlock(nn.Module):
         return self.addnorm2(Y, self.ffn(Y))
 
 class TransformerEncoder(d2l.Encoder):
-    """Transformer编码器
+    """transformer编码器
 
     Defined in :numref:`sec_transformer`"""
     def __init__(self, vocab_size, key_size, query_size, value_size,
@@ -1359,7 +1345,7 @@ class TransformerEncoder(d2l.Encoder):
         self.pos_encoding = d2l.PositionalEncoding(num_hiddens, dropout)
         self.blks = nn.Sequential()
         for i in range(num_layers):
-            self.blks.add_module("block"+str(i),
+            self.blks.add_sublayer(str(i),
                 EncoderBlock(key_size, query_size, value_size, num_hiddens,
                              norm_shape, ffn_num_input, ffn_num_hiddens,
                              num_heads, dropout, use_bias))
@@ -1402,8 +1388,8 @@ def show_trace_2d(f, results):
     Defined in :numref:`subsec_gd-learningrate`"""
     d2l.set_figsize()
     d2l.plt.plot(*zip(*results), '-o', color='#ff7f0e')
-    x1, x2 = d2l.meshgrid(d2l.arange(-5.5, 1.0, 0.1),
-                          d2l.arange(-3.0, 1.0, 0.1), indexing='ij')
+    x1, x2 = d2l.meshgrid(d2l.arange(-5.5, 1.0, 0.1, dtype='float32'),
+                          d2l.arange(-3.0, 1.0, 0.1, dtype='float32'))
     d2l.plt.contour(x1, x2, f(x1, x2), colors='#1f77b4')
     d2l.plt.xlabel('x1')
     d2l.plt.ylabel('x2')
@@ -1415,7 +1401,7 @@ def get_data_ch11(batch_size=10, n=1500):
     """Defined in :numref:`sec_minibatches`"""
     data = np.genfromtxt(d2l.download('airfoil'),
                          dtype=np.float32, delimiter='\t')
-    data = torch.from_numpy((data - data.mean(axis=0)) / data.std(axis=0))
+    data = d2l.tensor((data - data.mean(axis=0)) / data.std(axis=0))
     data_iter = d2l.load_array((data[:n, :-1], data[:n, -1]),
                                batch_size, is_train=True)
     return data_iter, data.shape[1]-1
@@ -1424,9 +1410,8 @@ def train_ch11(trainer_fn, states, hyperparams, data_iter,
                feature_dim, num_epochs=2):
     """Defined in :numref:`sec_minibatches`"""
     # 初始化模型
-    w = torch.normal(mean=0.0, std=0.01, size=(feature_dim, 1),
-                     requires_grad=True)
-    b = torch.zeros((1), requires_grad=True)
+    w = d2l.tensor(d2l.normal(mean=0.0, std=0.01, shape=(feature_dim, 1)), stop_gradient=False)
+    b = d2l.tensor(d2l.zeros((1,)), stop_gradient=False)
     net, loss = lambda X: d2l.linreg(X, w, b), d2l.squared_loss
     # 训练模型
     animator = d2l.Animator(xlabel='epoch', ylabel='loss',
@@ -1436,7 +1421,7 @@ def train_ch11(trainer_fn, states, hyperparams, data_iter,
         for X, y in data_iter:
             l = loss(net(X), y).mean()
             l.backward()
-            trainer_fn([w, b], states, hyperparams)
+            w, b = trainer_fn([w, b], states, hyperparams)
             n += X.shape[0]
             if n % 200 == 0:
                 timer.stop()
@@ -1452,17 +1437,18 @@ def train_concise_ch11(trainer_fn, hyperparams, data_iter, num_epochs=4):
     net = nn.Sequential(nn.Linear(5, 1))
     def init_weights(m):
         if type(m) == nn.Linear:
-            torch.nn.init.normal_(m.weight, std=0.01)
+            paddle.nn.initializer.Normal(m.weight, std=0.01)
+
     net.apply(init_weights)
 
-    optimizer = trainer_fn(net.parameters(), **hyperparams)
+    optimizer = trainer_fn(parameters=net.parameters(), **hyperparams)
     loss = nn.MSELoss(reduction='none')
     animator = d2l.Animator(xlabel='epoch', ylabel='loss',
                             xlim=[0, num_epochs], ylim=[0.22, 0.35])
     n, timer = 0, d2l.Timer()
     for _ in range(num_epochs):
         for X, y in data_iter:
-            optimizer.zero_grad()
+            optimizer.clear_grad()
             out = net(X)
             y = y.reshape(out.shape)
             l = loss(out, y)
@@ -1495,8 +1481,8 @@ def split_batch(X, y, devices):
 
     Defined in :numref:`sec_multi_gpu`"""
     assert X.shape[0] == y.shape[0]
-    return (nn.parallel.scatter(X, devices),
-            nn.parallel.scatter(y, devices))
+    return (paddlescatter(X, devices),
+            paddlescatter(y, devices))
 
 def resnet18(num_classes, in_channels=1):
     """稍加修改的ResNet-18模型
@@ -1515,31 +1501,32 @@ def resnet18(num_classes, in_channels=1):
 
     # 该模型使用了更小的卷积核、步长和填充，而且删除了最大汇聚层
     net = nn.Sequential(
-        nn.Conv2d(in_channels, 64, kernel_size=3, stride=1, padding=1),
-        nn.BatchNorm2d(64),
+        nn.Conv2D(in_channels, 64, kernel_size=3, stride=1, padding=1),
+        nn.BatchNorm2D(64),
         nn.ReLU())
-    net.add_module("resnet_block1", resnet_block(
+    net.add_sublayer("resnet_block1", resnet_block(
         64, 64, 2, first_block=True))
-    net.add_module("resnet_block2", resnet_block(64, 128, 2))
-    net.add_module("resnet_block3", resnet_block(128, 256, 2))
-    net.add_module("resnet_block4", resnet_block(256, 512, 2))
-    net.add_module("global_avg_pool", nn.AdaptiveAvgPool2d((1,1)))
-    net.add_module("fc", nn.Sequential(nn.Flatten(),
-                                       nn.Linear(512, num_classes)))
+    net.add_sublayer("resnet_block2", resnet_block(64, 128, 2))
+    net.add_sublayer("resnet_block3", resnet_block(128, 256, 2))
+    net.add_sublayer("resnet_block4", resnet_block(256, 512, 2))
+    net.add_sublayer("global_avg_pool", nn.AdaptiveAvgPool2D((1, 1)))
+    net.add_sublayer("fc", nn.Sequential(nn.Flatten(),
+                                         nn.Linear(512, num_classes)))
     return net
 
 def train_batch_ch13(net, X, y, loss, trainer, devices):
+    """Defined in :numref:`sec_image_augmentation`"""
     """用多GPU进行小批量训练
-
+    飞桨不支持在notebook上进行多GPU训练
     Defined in :numref:`sec_image_augmentation`"""
     if isinstance(X, list):
-        # 微调BERT中所需
-        X = [x.to(devices[0]) for x in X]
+        # 微调BERT中所需（稍后讨论）
+        X = [paddle.to_tensor(x, place=devices[0]) for x in X]
     else:
-        X = X.to(devices[0])
-    y = y.to(devices[0])
+        X = paddle.to_tensor(X, place=devices[0])
+    y = paddle.to_tensor(y, place=devices[0])
     net.train()
-    trainer.zero_grad()
+    trainer.clear_grad()
     pred = net(X)
     l = loss(pred, y)
     l.sum().backward()
@@ -1550,13 +1537,13 @@ def train_batch_ch13(net, X, y, loss, trainer, devices):
 
 def train_ch13(net, train_iter, test_iter, loss, trainer, num_epochs,
                devices=d2l.try_all_gpus()):
+    """Defined in :numref:`sec_image_augmentation`"""
     """用多GPU进行模型训练
-
     Defined in :numref:`sec_image_augmentation`"""
     timer, num_batches = d2l.Timer(), len(train_iter)
     animator = d2l.Animator(xlabel='epoch', xlim=[1, num_epochs], ylim=[0, 1],
                             legend=['train loss', 'train acc', 'test acc'])
-    net = nn.DataParallel(net, device_ids=devices).to(devices[0])
+    net = paddle.DataParallel(net)
     for epoch in range(num_epochs):
         # 4个维度：储存训练损失，训练准确度，实例数，特点数
         metric = d2l.Accumulator(4)
@@ -1617,38 +1604,38 @@ def multibox_prior(data, sizes, ratios):
 
     Defined in :numref:`sec_anchor`"""
     in_height, in_width = data.shape[-2:]
-    device, num_sizes, num_ratios = data.device, len(sizes), len(ratios)
+    place, num_sizes, num_ratios = data.place, len(sizes), len(ratios)
     boxes_per_pixel = (num_sizes + num_ratios - 1)
-    size_tensor = d2l.tensor(sizes, device=device)
-    ratio_tensor = d2l.tensor(ratios, device=device)
+    size_tensor = paddle.to_tensor(sizes, place=place)
+    ratio_tensor = paddle.to_tensor(ratios, place=place)
 
     # 为了将锚点移动到像素的中心，需要设置偏移量。
-    # 因为一个像素的高为1且宽为1，我们选择偏移我们的中心0.5
+    # 因为一个像素的的高为1且宽为1，我们选择偏移我们的中心0.5
     offset_h, offset_w = 0.5, 0.5
     steps_h = 1.0 / in_height  # 在y轴上缩放步长
     steps_w = 1.0 / in_width  # 在x轴上缩放步长
 
     # 生成锚框的所有中心点
-    center_h = (torch.arange(in_height, device=device) + offset_h) * steps_h
-    center_w = (torch.arange(in_width, device=device) + offset_w) * steps_w
-    shift_y, shift_x = torch.meshgrid(center_h, center_w, indexing='ij')
-    shift_y, shift_x = shift_y.reshape(-1), shift_x.reshape(-1)
+    center_h = (paddle.arange(in_height) + offset_h) * steps_h
+    center_w = (paddle.arange(in_width) + offset_w) * steps_w
+    shift_y, shift_x = paddle.meshgrid(center_h, center_w)
+    shift_y, shift_x = shift_y.reshape([-1]), shift_x.reshape([-1])
 
     # 生成“boxes_per_pixel”个高和宽，
     # 之后用于创建锚框的四角坐标(xmin,xmax,ymin,ymax)
-    w = torch.cat((size_tensor * torch.sqrt(ratio_tensor[0]),
-                   sizes[0] * torch.sqrt(ratio_tensor[1:])))\
-                   * in_height / in_width  # 处理矩形输入
-    h = torch.cat((size_tensor / torch.sqrt(ratio_tensor[0]),
-                   sizes[0] / torch.sqrt(ratio_tensor[1:])))
+    w = paddle.concat((size_tensor * paddle.sqrt(ratio_tensor[0]),
+                       sizes[0] * paddle.sqrt(ratio_tensor[1:])))\
+                       * in_height / in_width  # 处理矩形输入
+    h = paddle.concat((size_tensor / paddle.sqrt(ratio_tensor[0]),
+                   sizes[0] / paddle.sqrt(ratio_tensor[1:])))
     # 除以2来获得半高和半宽
-    anchor_manipulations = torch.stack((-w, -h, w, h)).T.repeat(
-                                        in_height * in_width, 1) / 2
+    anchor_manipulations = paddle.tile(paddle.stack((-w, -h, w, h)).T,
+                                        (in_height * in_width, 1)) / 2
 
     # 每个中心点都将有“boxes_per_pixel”个锚框，
     # 所以生成含所有锚框中心的网格，重复了“boxes_per_pixel”次
-    out_grid = torch.stack([shift_x, shift_y, shift_x, shift_y],
-                dim=1).repeat_interleave(boxes_per_pixel, dim=0)
+    out_grid = paddle.stack([shift_x, shift_y, shift_x, shift_y], axis=1)
+    out_grid = paddle.tile(out_grid, repeat_times=[boxes_per_pixel]).reshape((-1, out_grid.shape[1]))
     output = out_grid + anchor_manipulations
     return output.unsqueeze(0)
 
@@ -1690,15 +1677,15 @@ def box_iou(boxes1, boxes2):
     areas2 = box_area(boxes2)
     # inter_upperlefts,inter_lowerrights,inters的形状:
     # (boxes1的数量,boxes2的数量,2)
-    inter_upperlefts = torch.max(boxes1[:, None, :2], boxes2[:, :2])
-    inter_lowerrights = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])
-    inters = (inter_lowerrights - inter_upperlefts).clamp(min=0)
+    inter_upperlefts = paddle.maximum(boxes1[:, None, :2], boxes2[:, :2])
+    inter_lowerrights = paddle.minimum(boxes1[:, None, 2:], boxes2[:, 2:])
+    inters = (inter_lowerrights - inter_upperlefts).clip(min=0)
     # inter_areasandunion_areas的形状:(boxes1的数量,boxes2的数量)
     inter_areas = inters[:, :, 0] * inters[:, :, 1]
     union_areas = areas1[:, None] + areas2 - inter_areas
     return inter_areas / union_areas
 
-def assign_anchor_to_bbox(ground_truth, anchors, device, iou_threshold=0.5):
+def assign_anchor_to_bbox(ground_truth, anchors, place, iou_threshold=0.5):
     """将最接近的真实边界框分配给锚框
 
     Defined in :numref:`sec_anchor`"""
@@ -1706,19 +1693,19 @@ def assign_anchor_to_bbox(ground_truth, anchors, device, iou_threshold=0.5):
     # 位于第i行和第j列的元素x_ij是锚框i和真实边界框j的IoU
     jaccard = box_iou(anchors, ground_truth)
     # 对于每个锚框，分配的真实边界框的张量
-    anchors_bbox_map = torch.full((num_anchors,), -1, dtype=torch.long,
-                                  device=device)
+    anchors_bbox_map = paddle.full((num_anchors,), -1, dtype=paddle.int64)
     # 根据阈值，决定是否分配真实边界框
-    max_ious, indices = torch.max(jaccard, dim=1)
-    anc_i = torch.nonzero(max_ious >= iou_threshold).reshape(-1)
-    box_j = indices[max_ious >= iou_threshold]
+    max_ious = paddle.max(jaccard, axis=1)
+    indices = paddle.argmax(jaccard, axis=1)
+    anc_i = paddle.nonzero(max_ious >= 0.5).reshape([-1])
+    box_j = indices[max_ious >= 0.5]
     anchors_bbox_map[anc_i] = box_j
-    col_discard = torch.full((num_anchors,), -1)
-    row_discard = torch.full((num_gt_boxes,), -1)
+    col_discard = paddle.full((num_anchors,), -1)
+    row_discard = paddle.full((num_gt_boxes,), -1)
     for _ in range(num_gt_boxes):
-        max_idx = torch.argmax(jaccard)
-        box_idx = (max_idx % num_gt_boxes).long()
-        anc_idx = (max_idx / num_gt_boxes).long()
+        max_idx = paddle.argmax(jaccard)
+        box_idx = paddle.cast((max_idx % num_gt_boxes), dtype='int64')
+        anc_idx = paddle.cast((max_idx / num_gt_boxes), dtype='int64')
         anchors_bbox_map[anc_idx] = box_idx
         jaccard[:, box_idx] = col_discard
         jaccard[anc_idx, :] = row_discard
@@ -1741,32 +1728,31 @@ def multibox_target(anchors, labels):
     Defined in :numref:`subsec_labeling-anchor-boxes`"""
     batch_size, anchors = labels.shape[0], anchors.squeeze(0)
     batch_offset, batch_mask, batch_class_labels = [], [], []
-    device, num_anchors = anchors.device, anchors.shape[0]
+    place, num_anchors = anchors.place, anchors.shape[0]
     for i in range(batch_size):
         label = labels[i, :, :]
         anchors_bbox_map = assign_anchor_to_bbox(
-            label[:, 1:], anchors, device)
-        bbox_mask = ((anchors_bbox_map >= 0).float().unsqueeze(-1)).repeat(
-            1, 4)
+            label[:, 1:], anchors, place)
+        bbox_mask = paddle.tile(paddle.to_tensor((anchors_bbox_map >= 0), dtype='float32').unsqueeze(-1), (1, 4))
         # 将类标签和分配的边界框坐标初始化为零
-        class_labels = torch.zeros(num_anchors, dtype=torch.long,
-                                   device=device)
-        assigned_bb = torch.zeros((num_anchors, 4), dtype=torch.float32,
-                                  device=device)
+        class_labels = paddle.zeros(paddle.to_tensor(num_anchors), dtype=paddle.int64)
+        assigned_bb = paddle.zeros(paddle.to_tensor((num_anchors, 4)), dtype=paddle.float32)
         # 使用真实边界框来标记锚框的类别。
-        # 如果一个锚框没有被分配，标记其为背景（值为零）
-        indices_true = torch.nonzero(anchors_bbox_map >= 0)
-        bb_idx = anchors_bbox_map[indices_true]
-        class_labels[indices_true] = label[bb_idx, 0].long() + 1
-        assigned_bb[indices_true] = label[bb_idx, 1:]
+        # 如果一个锚框没有被分配，我们标记其为背景（值为零）
+        indices_true = paddle.nonzero(anchors_bbox_map >= 0).numpy()
+        bb_idx = anchors_bbox_map[indices_true].numpy()
+        class_labels[indices_true] = label.numpy()[bb_idx, 0][:] + 1
+        assigned_bb[indices_true] = label.numpy()[bb_idx, 1:]
+        class_labels = paddle.to_tensor(class_labels)
+        assigned_bb = paddle.to_tensor(assigned_bb)
         # 偏移量转换
         offset = offset_boxes(anchors, assigned_bb) * bbox_mask
-        batch_offset.append(offset.reshape(-1))
-        batch_mask.append(bbox_mask.reshape(-1))
+        batch_offset.append(offset.reshape([-1]))
+        batch_mask.append(bbox_mask.reshape([-1]))
         batch_class_labels.append(class_labels)
-    bbox_offset = torch.stack(batch_offset)
-    bbox_mask = torch.stack(batch_mask)
-    class_labels = torch.stack(batch_class_labels)
+    bbox_offset = paddle.stack(batch_offset)
+    bbox_mask = paddle.stack(batch_mask)
+    class_labels = paddle.stack(batch_class_labels)
     return (bbox_offset, bbox_mask, class_labels)
 
 def offset_inverse(anchors, offset_preds):
@@ -1784,51 +1770,52 @@ def nms(boxes, scores, iou_threshold):
     """对预测边界框的置信度进行排序
 
     Defined in :numref:`subsec_predicting-bounding-boxes-nms`"""
-    B = torch.argsort(scores, dim=-1, descending=True)
+    B = paddle.argsort(scores, axis=-1, descending=True)
     keep = []  # 保留预测边界框的指标
-    while B.numel() > 0:
+    while B.numel().item() > 0:
         i = B[0]
-        keep.append(i)
-        if B.numel() == 1: break
-        iou = box_iou(boxes[i, :].reshape(-1, 4),
-                      boxes[B[1:], :].reshape(-1, 4)).reshape(-1)
-        inds = torch.nonzero(iou <= iou_threshold).reshape(-1)
-        B = B[inds + 1]
-    return d2l.tensor(keep, device=boxes.device)
+        keep.append(i.item())
+        if B.numel().item() == 1: break
+        iou = box_iou(boxes[i.numpy(), :].reshape([-1, 4]),
+                      paddle.to_tensor(boxes.numpy()[B[1:].numpy(), :]).reshape([-1, 4])).reshape([-1])
+        inds = paddle.nonzero(iou <= iou_threshold).numpy().reshape([-1])
+        B = paddle.to_tensor(B.numpy()[inds + 1])
+    return paddle.to_tensor(keep, place=boxes.place, dtype='int64')
 
 def multibox_detection(cls_probs, offset_preds, anchors, nms_threshold=0.5,
                        pos_threshold=0.009999999):
     """使用非极大值抑制来预测边界框
 
     Defined in :numref:`subsec_predicting-bounding-boxes-nms`"""
-    device, batch_size = cls_probs.device, cls_probs.shape[0]
+    batch_size = cls_probs.shape[0]
     anchors = anchors.squeeze(0)
     num_classes, num_anchors = cls_probs.shape[1], cls_probs.shape[2]
     out = []
     for i in range(batch_size):
-        cls_prob, offset_pred = cls_probs[i], offset_preds[i].reshape(-1, 4)
-        conf, class_id = torch.max(cls_prob[1:], 0)
+        cls_prob, offset_pred = cls_probs[i], offset_preds[i].reshape([-1, 4])
+        conf = paddle.max(cls_prob[1:], 0)
+        class_id = paddle.argmax(cls_prob[1:], 0)
         predicted_bb = offset_inverse(anchors, offset_pred)
         keep = nms(predicted_bb, conf, nms_threshold)
 
         # 找到所有的non_keep索引，并将类设置为背景
-        all_idx = torch.arange(num_anchors, dtype=torch.long, device=device)
-        combined = torch.cat((keep, all_idx))
+        all_idx = paddle.arange(num_anchors, dtype='int64')
+        combined = paddle.concat((keep, all_idx))
         uniques, counts = combined.unique(return_counts=True)
         non_keep = uniques[counts == 1]
-        all_id_sorted = torch.cat((keep, non_keep))
-        class_id[non_keep] = -1
+        all_id_sorted = paddle.concat([keep, non_keep])
+        class_id[non_keep.numpy()] = -1
         class_id = class_id[all_id_sorted]
         conf, predicted_bb = conf[all_id_sorted], predicted_bb[all_id_sorted]
         # pos_threshold是一个用于非背景预测的阈值
         below_min_idx = (conf < pos_threshold)
-        class_id[below_min_idx] = -1
-        conf[below_min_idx] = 1 - conf[below_min_idx]
-        pred_info = torch.cat((class_id.unsqueeze(1),
-                               conf.unsqueeze(1),
-                               predicted_bb), dim=1)
+        class_id[below_min_idx.numpy()] = -1
+        conf[below_min_idx.numpy()] = 1 - conf[below_min_idx.numpy()]
+        pred_info = paddle.concat((paddle.to_tensor(class_id, dtype='float32').unsqueeze(1),
+                               paddle.to_tensor(conf, dtype='float32').unsqueeze(1),
+                               predicted_bb), axis=1)
         out.append(pred_info)
-    return d2l.stack(out)
+    return paddle.stack(out)
 
 d2l.DATA_HUB['banana-detection'] = (
     d2l.DATA_URL + 'banana-detection.zip',
@@ -1845,15 +1832,15 @@ def read_data_bananas(is_train=True):
     csv_data = csv_data.set_index('img_name')
     images, targets = [], []
     for img_name, target in csv_data.iterrows():
-        images.append(torchvision.io.read_image(
-            os.path.join(data_dir, 'bananas_train' if is_train else
-                         'bananas_val', 'images', f'{img_name}')))
-        # 这里的target包含（类别，左上角x，左上角y，右下角x，右下角y），
+        paddle.vision.set_image_backend('cv2')
+        images.append(paddlevision.image_load(os.path.join(data_dir, 'bananas_train' if is_train else
+        'bananas_val', 'images', f'{img_name}'))[..., ::-1])
+        # 这里的target包含（类别，左上角x，左上角y，右下角x，右下角y）
         # 其中所有图像都具有相同的香蕉类（索引为0）
         targets.append(list(target))
-    return images, torch.tensor(targets).unsqueeze(1) / 256
+    return images, paddle.to_tensor(targets).unsqueeze(1) / 256
 
-class BananasDataset(torch.utils.data.Dataset):
+class BananasDataset(paddle.io.Dataset):
     """一个用于加载香蕉检测数据集的自定义数据集
 
     Defined in :numref:`sec_object-detection-dataset`"""
@@ -1863,7 +1850,7 @@ class BananasDataset(torch.utils.data.Dataset):
               is_train else f' validation examples'))
 
     def __getitem__(self, idx):
-        return (self.features[idx].float(), self.labels[idx])
+        return (paddle.to_tensor(self.features[idx], dtype='float32').transpose([2, 0, 1]), self.labels[idx])
 
     def __len__(self):
         return len(self.features)
@@ -1872,30 +1859,33 @@ def load_data_bananas(batch_size):
     """加载香蕉检测数据集
 
     Defined in :numref:`sec_object-detection-dataset`"""
-    train_iter = torch.utils.data.DataLoader(BananasDataset(is_train=True),
-                                             batch_size, shuffle=True)
-    val_iter = torch.utils.data.DataLoader(BananasDataset(is_train=False),
-                                           batch_size)
+    train_iter = paddle.io.DataLoader(BananasDataset(is_train=True),
+                                      batch_size=batch_size, return_list=True, shuffle=True)
+    val_iter = paddle.io.DataLoader(BananasDataset(is_train=False),
+                                    batch_size=batch_size, return_list=True)
     return train_iter, val_iter
 
 d2l.DATA_HUB['voc2012'] = (d2l.DATA_URL + 'VOCtrainval_11-May-2012.tar',
                            '4e443f8a2eca6b1dac8a6c57641b67dd40621a49')
 
 def read_voc_images(voc_dir, is_train=True):
-    """读取所有VOC图像并标注
+    """Defined in :numref:`sec_semantic_segmentation`
 
+    Defined in :numref:`sec_semantic_segmentation`"""
+    """读取所有VOC图像并标注
     Defined in :numref:`sec_semantic_segmentation`"""
     txt_fname = os.path.join(voc_dir, 'ImageSets', 'Segmentation',
                              'train.txt' if is_train else 'val.txt')
-    mode = torchvision.io.image.ImageReadMode.RGB
     with open(txt_fname, 'r') as f:
         images = f.read().split()
     features, labels = [], []
     for i, fname in enumerate(images):
-        features.append(torchvision.io.read_image(os.path.join(
-            voc_dir, 'JPEGImages', f'{fname}.jpg')))
-        labels.append(torchvision.io.read_image(os.path.join(
-            voc_dir, 'SegmentationClass' ,f'{fname}.png'), mode))
+        features.append(paddle.vision.image.image_load(os.path.join(
+            voc_dir, 'JPEGImages', f'{fname}.jpg'), backend='cv2')[..., ::-1].transpose(
+            [2, 0, 1]))
+        labels.append(paddle.vision.image.image_load(os.path.join(
+            voc_dir, 'SegmentationClass', f'{fname}.png'), backend='cv2')[..., ::-1].transpose(
+            [2, 0, 1]))
     return features, labels
 
 VOC_COLORMAP = [[0, 0, 0], [128, 0, 0], [0, 128, 0], [128, 128, 0],
@@ -1914,7 +1904,7 @@ def voc_colormap2label():
     """构建从RGB到VOC类别索引的映射
 
     Defined in :numref:`sec_semantic_segmentation`"""
-    colormap2label = torch.zeros(256 ** 3, dtype=torch.long)
+    colormap2label = paddle.zeros([256 ** 3], dtype=paddle.int64)
     for i, colormap in enumerate(VOC_COLORMAP):
         colormap2label[
             (colormap[0] * 256 + colormap[1]) * 256 + colormap[2]] = i
@@ -1924,7 +1914,7 @@ def voc_label_indices(colormap, colormap2label):
     """将VOC标签中的RGB值映射到它们的类别索引
 
     Defined in :numref:`sec_semantic_segmentation`"""
-    colormap = colormap.permute(1, 2, 0).numpy().astype('int32')
+    colormap = colormap.transpose([1, 2, 0]).astype('int32')
     idx = ((colormap[:, :, 0] * 256 + colormap[:, :, 1]) * 256
            + colormap[:, :, 2])
     return colormap2label[idx]
@@ -1933,19 +1923,19 @@ def voc_rand_crop(feature, label, height, width):
     """随机裁剪特征和标签图像
 
     Defined in :numref:`sec_semantic_segmentation`"""
-    rect = torchvision.transforms.RandomCrop.get_params(
-        feature, (height, width))
-    feature = torchvision.transforms.functional.crop(feature, *rect)
-    label = torchvision.transforms.functional.crop(label, *rect)
+    rect = paddle.vision.transforms.RandomCrop((height, width))._get_param(
+        img=feature, output_size=(height, width))
+    feature = paddle.vision.transforms.crop(feature, *rect)
+    label = paddle.vision.transforms.crop(label, *rect)
     return feature, label
 
-class VOCSegDataset(torch.utils.data.Dataset):
+class VOCSegDataset(paddle.io.Dataset):
+    """Defined in :numref:`sec_semantic_segmentation`"""
     """一个用于加载VOC数据集的自定义数据集
-
     Defined in :numref:`sec_semantic_segmentation`"""
 
     def __init__(self, is_train, crop_size, voc_dir):
-        self.transform = torchvision.transforms.Normalize(
+        self.transform = paddle.vision.transforms.Normalize(
             mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         self.crop_size = crop_size
         features, labels = read_voc_images(voc_dir, is_train=is_train)
@@ -1956,7 +1946,7 @@ class VOCSegDataset(torch.utils.data.Dataset):
         print('read ' + str(len(self.features)) + ' examples')
 
     def normalize_image(self, img):
-        return self.transform(img.float() / 255)
+        return self.transform(img.astype("float32") / 255)
 
     def filter(self, imgs):
         return [img for img in imgs if (
@@ -1964,7 +1954,9 @@ class VOCSegDataset(torch.utils.data.Dataset):
             img.shape[2] >= self.crop_size[1])]
 
     def __getitem__(self, idx):
-        feature, label = voc_rand_crop(self.features[idx], self.labels[idx],
+        feature = paddle.to_tensor(self.features[idx],dtype='float32')
+        label = paddle.to_tensor(self.labels[idx],dtype='float32')
+        feature, label = voc_rand_crop(feature,label,
                                        *self.crop_size)
         return (feature, voc_label_indices(label, self.colormap2label))
 
@@ -1978,12 +1970,12 @@ def load_data_voc(batch_size, crop_size):
     voc_dir = d2l.download_extract('voc2012', os.path.join(
         'VOCdevkit', 'VOC2012'))
     num_workers = d2l.get_dataloader_workers()
-    train_iter = torch.utils.data.DataLoader(
-        VOCSegDataset(True, crop_size, voc_dir), batch_size,
-        shuffle=True, drop_last=True, num_workers=num_workers)
-    test_iter = torch.utils.data.DataLoader(
-        VOCSegDataset(False, crop_size, voc_dir), batch_size,
-        drop_last=True, num_workers=num_workers)
+    train_iter = paddle.io.DataLoader(
+        VOCSegDataset(True, crop_size, voc_dir), batch_size=batch_size,
+        shuffle=True, return_list=True, drop_last=True, num_workers=num_workers)
+    test_iter = paddle.io.DataLoader(
+        VOCSegDataset(False, crop_size, voc_dir), batch_size=batch_size,
+        drop_last=True, return_list=True, num_workers=num_workers)
     return train_iter, test_iter
 
 d2l.DATA_HUB['cifar10_tiny'] = (d2l.DATA_URL + 'kaggle_cifar10_tiny.zip',
@@ -2161,7 +2153,7 @@ def load_data_ptb(batch_size, max_window_size, num_noise_words):
     all_negatives = get_negatives(
         all_contexts, vocab, counter, num_noise_words)
 
-    class PTBDataset(torch.utils.data.Dataset):
+    class PTBDataset(paddle.io.Dataset):
         def __init__(self, centers, contexts, negatives):
             assert len(centers) == len(contexts) == len(negatives)
             self.centers = centers
@@ -2177,8 +2169,8 @@ def load_data_ptb(batch_size, max_window_size, num_noise_words):
 
     dataset = PTBDataset(all_centers, all_contexts, all_negatives)
 
-    data_iter = torch.utils.data.DataLoader(
-        dataset, batch_size, shuffle=True,
+    data_iter = paddle.io.DataLoader(
+        dataset, batch_size=batch_size, shuffle=True, return_list=True,
         collate_fn=batchify, num_workers=num_workers)
     return data_iter, vocab
 
@@ -2241,7 +2233,7 @@ def get_tokens_and_segments(tokens_a, tokens_b=None):
         segments += [1] * (len(tokens_b) + 1)
     return tokens, segments
 
-class BERTEncoder(nn.Module):
+class BERTEncoder(nn.Layer):
     """BERT编码器
 
     Defined in :numref:`subsec_bert_input_rep`"""
@@ -2254,22 +2246,23 @@ class BERTEncoder(nn.Module):
         self.segment_embedding = nn.Embedding(2, num_hiddens)
         self.blks = nn.Sequential()
         for i in range(num_layers):
-            self.blks.add_module(f"{i}", d2l.EncoderBlock(
+            self.blks.add_sublayer(f"{i}", d2l.EncoderBlock(
                 key_size, query_size, value_size, num_hiddens, norm_shape,
                 ffn_num_input, ffn_num_hiddens, num_heads, dropout, True))
         # 在BERT中，位置嵌入是可学习的，因此我们创建一个足够长的位置嵌入参数
-        self.pos_embedding = nn.Parameter(torch.randn(1, max_len,
-                                                      num_hiddens))
+        x = paddle.randn([1, max_len, num_hiddens])
+        self.pos_embedding = paddle.create_parameter(shape=x.shape, dtype=str(x.numpy().dtype),
+                                                     default_initializer=paddle.nn.initializer.Assign(x))
 
     def forward(self, tokens, segments, valid_lens):
         # 在以下代码段中，X的形状保持不变：（批量大小，最大序列长度，num_hiddens）
         X = self.token_embedding(tokens) + self.segment_embedding(segments)
-        X = X + self.pos_embedding.data[:, :X.shape[1], :]
+        X = X + self.pos_embedding[:, :X.shape[1], :]
         for blk in self.blks:
             X = blk(X, valid_lens)
         return X
 
-class MaskLM(nn.Module):
+class MaskLM(nn.Layer):
     """BERT的掩蔽语言模型任务
 
     Defined in :numref:`subsec_bert_input_rep`"""
@@ -2282,18 +2275,18 @@ class MaskLM(nn.Module):
 
     def forward(self, X, pred_positions):
         num_pred_positions = pred_positions.shape[1]
-        pred_positions = pred_positions.reshape(-1)
+        pred_positions = pred_positions.reshape([-1])
         batch_size = X.shape[0]
-        batch_idx = torch.arange(0, batch_size)
+        batch_idx = paddle.arange(0, batch_size)
         # 假设batch_size=2，num_pred_positions=3
-        # 那么batch_idx是np.array（[0,0,0,1,1,1]）
-        batch_idx = torch.repeat_interleave(batch_idx, num_pred_positions)
+        # 那么batch_idx是np.array（[0,0,0,1,1]）
+        batch_idx = paddle.repeat_interleave(batch_idx, num_pred_positions)
         masked_X = X[batch_idx, pred_positions]
         masked_X = masked_X.reshape((batch_size, num_pred_positions, -1))
         mlm_Y_hat = self.mlp(masked_X)
         return mlm_Y_hat
 
-class NextSentencePred(nn.Module):
+class NextSentencePred(nn.Layer):
     """BERT的下一句预测任务
 
     Defined in :numref:`subsec_mlm`"""
@@ -2305,7 +2298,7 @@ class NextSentencePred(nn.Module):
         # X的形状：(batchsize,num_hiddens)
         return self.output(X)
 
-class BERTModel(nn.Module):
+class BERTModel(nn.Layer):
     """BERT模型
 
     Defined in :numref:`subsec_nsp`"""
@@ -2427,26 +2420,26 @@ def _pad_bert_inputs(examples, max_len, vocab):
     nsp_labels = []
     for (token_ids, pred_positions, mlm_pred_label_ids, segments,
          is_next) in examples:
-        all_token_ids.append(torch.tensor(token_ids + [vocab['<pad>']] * (
-            max_len - len(token_ids)), dtype=torch.long))
-        all_segments.append(torch.tensor(segments + [0] * (
-            max_len - len(segments)), dtype=torch.long))
+        all_token_ids.append(paddle.to_tensor(token_ids + [vocab['<pad>']] * (
+            max_len - len(token_ids)), dtype=paddle.int64))
+        all_segments.append(paddle.to_tensor(segments + [0] * (
+            max_len - len(segments)), dtype=paddle.int64))
         # valid_lens不包括'<pad>'的计数
-        valid_lens.append(torch.tensor(len(token_ids), dtype=torch.float32))
-        all_pred_positions.append(torch.tensor(pred_positions + [0] * (
-            max_num_mlm_preds - len(pred_positions)), dtype=torch.long))
+        valid_lens.append(paddle.to_tensor(len(token_ids), dtype=paddle.float32))
+        all_pred_positions.append(paddle.to_tensor(pred_positions + [0] * (
+            max_num_mlm_preds - len(pred_positions)), dtype=paddle.int64))
         # 填充词元的预测将通过乘以0权重在损失中过滤掉
         all_mlm_weights.append(
-            torch.tensor([1.0] * len(mlm_pred_label_ids) + [0.0] * (
+            paddle.to_tensor([1.0] * len(mlm_pred_label_ids) + [0.0] * (
                 max_num_mlm_preds - len(pred_positions)),
-                dtype=torch.float32))
-        all_mlm_labels.append(torch.tensor(mlm_pred_label_ids + [0] * (
-            max_num_mlm_preds - len(mlm_pred_label_ids)), dtype=torch.long))
-        nsp_labels.append(torch.tensor(is_next, dtype=torch.long))
+                dtype=paddle.float32))
+        all_mlm_labels.append(paddle.to_tensor(mlm_pred_label_ids + [0] * (
+            max_num_mlm_preds - len(mlm_pred_label_ids)), dtype=paddle.int64))
+        nsp_labels.append(paddle.to_tensor(is_next, dtype=paddle.int64))
     return (all_token_ids, all_segments, valid_lens, all_pred_positions,
             all_mlm_weights, all_mlm_labels, nsp_labels)
 
-class _WikiTextDataset(torch.utils.data.Dataset):
+class _WikiTextDataset(paddle.io.Dataset):
     """Defined in :numref:`subsec_prepare_mlm_data`"""
     def __init__(self, paragraphs, max_len):
         # 输入paragraphs[i]是代表段落的句子字符串列表；
@@ -2489,7 +2482,7 @@ def load_data_wiki(batch_size, max_len):
     data_dir = d2l.download_extract('wikitext-2', 'wikitext-2')
     paragraphs = _read_wiki(data_dir)
     train_set = _WikiTextDataset(paragraphs, max_len)
-    train_iter = torch.utils.data.DataLoader(train_set, batch_size,
+    train_iter = paddle.io.DataLoader(dataset=train_set, batch_size=batch_size, return_list=True,
                                         shuffle=True, num_workers=num_workers)
     return train_iter, train_set.vocab
 
@@ -2500,11 +2493,11 @@ def _get_batch_loss_bert(net, loss, vocab_size, tokens_X,
     """Defined in :numref:`sec_bert-pretraining`"""
     # 前向传播
     _, mlm_Y_hat, nsp_Y_hat = net(tokens_X, segments_X,
-                                  valid_lens_x.reshape(-1),
+                                  valid_lens_x.reshape([-1]),
                                   pred_positions_X)
     # 计算遮蔽语言模型损失
-    mlm_l = loss(mlm_Y_hat.reshape(-1, vocab_size), mlm_Y.reshape(-1)) *\
-    mlm_weights_X.reshape(-1, 1)
+    mlm_l = loss(mlm_Y_hat.reshape([-1, vocab_size]), mlm_Y.reshape([-1])) *\
+    mlm_weights_X.reshape([-1, 1])
     mlm_l = mlm_l.sum() / (mlm_weights_X.sum() + 1e-8)
     # 计算下一句子预测任务的损失
     nsp_l = loss(nsp_Y_hat, nsp_y)
@@ -2540,13 +2533,13 @@ def load_data_imdb(batch_size, num_steps=500):
     train_tokens = d2l.tokenize(train_data[0], token='word')
     test_tokens = d2l.tokenize(test_data[0], token='word')
     vocab = d2l.Vocab(train_tokens, min_freq=5)
-    train_features = torch.tensor([d2l.truncate_pad(
+    train_features = d2l.tensor([d2l.truncate_pad(
         vocab[line], num_steps, vocab['<pad>']) for line in train_tokens])
-    test_features = torch.tensor([d2l.truncate_pad(
+    test_features = d2l.tensor([d2l.truncate_pad(
         vocab[line], num_steps, vocab['<pad>']) for line in test_tokens])
-    train_iter = d2l.load_array((train_features, torch.tensor(train_data[1])),
+    train_iter = d2l.load_array((train_features, d2l.tensor(train_data[1])),
                                 batch_size)
-    test_iter = d2l.load_array((test_features, torch.tensor(test_data[1])),
+    test_iter = d2l.load_array((test_features, d2l.tensor(test_data[1])),
                                batch_size,
                                is_train=False)
     return train_iter, test_iter, vocab
@@ -2555,8 +2548,8 @@ def predict_sentiment(net, vocab, sequence):
     """预测文本序列的情感
 
     Defined in :numref:`sec_sentiment_rnn`"""
-    sequence = torch.tensor(vocab[sequence.split()], device=d2l.try_gpu())
-    label = torch.argmax(net(sequence.reshape(1, -1)), dim=1)
+    sequence = paddle.to_tensor(vocab[sequence.split()], place=d2l.try_gpu())
+    label = paddle.argmax(net(sequence.reshape((1, -1))), axis=1)
     return 'positive' if label == 1 else 'negative'
 
 d2l.DATA_HUB['SNLI'] = (
@@ -2585,7 +2578,7 @@ def read_snli(data_dir, is_train):
     labels = [label_set[row[0]] for row in rows if row[0] in label_set]
     return premises, hypotheses, labels
 
-class SNLIDataset(torch.utils.data.Dataset):
+class SNLIDataset(paddle.io.Dataset):
     """用于加载SNLI数据集的自定义数据集
 
     Defined in :numref:`sec_natural-language-inference-and-dataset`"""
@@ -2600,11 +2593,11 @@ class SNLIDataset(torch.utils.data.Dataset):
             self.vocab = vocab
         self.premises = self._pad(all_premise_tokens)
         self.hypotheses = self._pad(all_hypothesis_tokens)
-        self.labels = torch.tensor(dataset[2])
+        self.labels = paddle.to_tensor(dataset[2])
         print('read ' + str(len(self.premises)) + ' examples')
 
     def _pad(self, lines):
-        return torch.tensor([d2l.truncate_pad(
+        return paddle.to_tensor([d2l.truncate_pad(
             self.vocab[line], self.num_steps, self.vocab['<pad>'])
                          for line in lines])
 
@@ -2624,12 +2617,15 @@ def load_data_snli(batch_size, num_steps=50):
     test_data = read_snli(data_dir, False)
     train_set = SNLIDataset(train_data, num_steps)
     test_set = SNLIDataset(test_data, num_steps, train_set.vocab)
-    train_iter = torch.utils.data.DataLoader(train_set, batch_size,
-                                             shuffle=True,
-                                             num_workers=num_workers)
-    test_iter = torch.utils.data.DataLoader(test_set, batch_size,
-                                            shuffle=False,
-                                            num_workers=num_workers)
+    train_iter = paddle.io.DataLoader(train_set,batch_size=batch_size,
+                                      shuffle=True,
+                                      num_workers=num_workers,
+                                      return_list=True)
+
+    test_iter = paddle.io.DataLoader(test_set, batch_size=batch_size,
+                                     shuffle=False,
+                                     num_workers=num_workers,
+                                     return_list=True)
     return train_iter, test_iter, train_set.vocab
 
 def predict_snli(net, vocab, premise, hypothesis):
@@ -2637,47 +2633,48 @@ def predict_snli(net, vocab, premise, hypothesis):
 
     Defined in :numref:`sec_natural-language-inference-attention`"""
     net.eval()
-    premise = torch.tensor(vocab[premise], device=d2l.try_gpu())
-    hypothesis = torch.tensor(vocab[hypothesis], device=d2l.try_gpu())
-    label = torch.argmax(net([premise.reshape((1, -1)),
-                           hypothesis.reshape((1, -1))]), dim=1)
+    premise = paddle.to_tensor(vocab[premise], place=d2l.try_gpu())
+    hypothesis = paddle.to_tensor(vocab[hypothesis], place=d2l.try_gpu())
+    label = paddle.argmax(net([premise.reshape((1, -1)),
+                           hypothesis.reshape((1, -1))]), axis=1)
+
     return 'entailment' if label == 0 else 'contradiction' if label == 1 \
             else 'neutral'
 
 
 # Alias defined in config.ini
-nn_Module = nn.Module
+nn_Module = nn.Layer
 
-ones = torch.ones
-zeros = torch.zeros
-tensor = torch.tensor
-arange = torch.arange
-meshgrid = torch.meshgrid
-sin = torch.sin
-sinh = torch.sinh
-cos = torch.cos
-cosh = torch.cosh
-tanh = torch.tanh
-linspace = torch.linspace
-exp = torch.exp
-log = torch.log
-normal = torch.normal
-rand = torch.rand
-randn = torch.randn
-matmul = torch.matmul
-int32 = torch.int32
-float32 = torch.float32
-concat = torch.cat
-stack = torch.stack
-abs = torch.abs
-eye = torch.eye
+ones = paddle.ones
+zeros = paddle.zeros
+tensor = paddle.to_tensor
+arange = paddle.arange
+meshgrid = paddle.meshgrid
+sin = paddle.sin
+sinh = paddle.sinh
+cos = paddle.cos
+cosh = paddle.cosh
+tanh = paddle.tanh
+linspace = paddle.linspace
+exp = paddle.exp
+log = paddle.log
+normal = paddle.normal
+rand = paddle.rand
+randn = paddle.randn
+matmul = paddle.matmul
+int32 = paddle.int32
+float32 = paddle.float32
+concat = paddle.concat
+stack = paddle.stack
+abs = paddle.abs
+eye = paddle.eye
 numpy = lambda x, *args, **kwargs: x.detach().numpy(*args, **kwargs)
 size = lambda x, *args, **kwargs: x.numel(*args, **kwargs)
 reshape = lambda x, *args, **kwargs: x.reshape(*args, **kwargs)
 to = lambda x, *args, **kwargs: x.to(*args, **kwargs)
 reduce_sum = lambda x, *args, **kwargs: x.sum(*args, **kwargs)
 argmax = lambda x, *args, **kwargs: x.argmax(*args, **kwargs)
-astype = lambda x, *args, **kwargs: x.type(*args, **kwargs)
+astype = lambda x, *args, **kwargs: x.astype(*args, **kwargs)
 transpose = lambda x, *args, **kwargs: x.t(*args, **kwargs)
 reduce_mean = lambda x, *args, **kwargs: x.mean(*args, **kwargs)
 
