@@ -45,6 +45,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils import data
 from torchvision import transforms
+import torch_musa
 
 def use_svg_display():
     """使用svg格式在Jupyter中显示绘图
@@ -428,15 +429,21 @@ def try_gpu(i=0):
     Defined in :numref:`sec_use_gpu`"""
     if torch.cuda.device_count() >= i + 1:
         return torch.device(f'cuda:{i}')
+    if torch.musa.device_count() >= i + 1:
+        return torch.device(f'musa:{i}')
     return torch.device('cpu')
 
 def try_all_gpus():
     """返回所有可用的GPU，如果没有GPU，则返回[cpu(),]
 
     Defined in :numref:`sec_use_gpu`"""
-    devices = [torch.device(f'cuda:{i}')
-             for i in range(torch.cuda.device_count())]
-    return devices if devices else [torch.device('cpu')]
+    num = torch.cuda.device_count()
+    if num > 0:
+        return [torch.device(f'cuda:{i}') for i in range(num)]
+    num = torch.musa.device_count()
+    if num > 0:
+        return [torch.device(f'musa:{i}') for i in range(num)]
+    return [torch.device('cpu')]
 
 def corr2d(X, K):
     """计算二维互相关运算
